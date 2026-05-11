@@ -1,0 +1,94 @@
+name: Deploy to Elastic Beanstalk
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch: # Allow manual trigger from the GitHub Actions UI
+
+permissions:
+  contents: read
+  id-token: write # Required for OIDC — no stored AWS credentials needed
+
+env:
+  AWS_REGION: us-east-1
+  CF_STACK_NAME: eb-node-app
+
+jobs:
+  deploy:
+    name: Build and Deploy
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Assume AWS role via OIDC
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Fetch deployment config from CloudFormation outputs
+        id: cf
+        run: |
+          OUTPUTS=$(aws cloudformation describe-stacks \
+            --stack-name "${{ env.CF_STACK_NAME }}" \
+            --query "Stacks[0].Outputs" \
+            --output json)
+
+          echo "s3_bucket=$(echo "$OUTPUTS" | jq -r '.[] | select(.OutputKey=="S3BucketName") | .OutputValue')" >> "$GITHUB_OUTPUT"
+          echo "eb_app=$(echo "$OUTPUTS" | jq -r '.[] | select(.OutputKey=="EBApplicationName") | .OutputValue')"   >> "$GITHUB_OUTPUT"
+          echo "eb_env=$(echo "$OUTPUTS" | jq -r '.[] | select(.OutputKey=="EBEnvironmentName") | .OutputValue')"   >> "$GITHUB_OUTPUT"
+
+      - name: Generate version label
+        id: version
+        run: |
+          LABEL="v$(date +%Y%m%d%H%M%S)-${GITHUB_SHA::7}"
+          echo "label=$LABEL"        >> "$GITHUB_OUTPUT"
+          echo "bundle=${LABEL}.zip" >> "$GITHUB_OUTPUT"
+
+      - name: Package source bundle
+        run: |
+          zip -r "${{ steps.version.outputs.bundle }}" . \
+            --exclude "*.git*"          \
+            --exclude "*.github*"       \
+            --exclude "node_modules/*"  \
+            --exclude "cloudformation/*"\
+            --exclude "*.zip"
+
+      - name: Upload bundle to S3
+        run: |
+          aws s3 cp "${{ steps.version.outputs.bundle }}" \
+            "s3://${{ steps.cf.outputs.s3_bucket }}/${{ steps.version.outputs.bundle }}"
+
+      - name: Create Elastic Beanstalk application version
+        run: |
+          aws elasticbeanstalk create-application-version \
+            --application-name "${{ steps.cf.outputs.eb_app }}" \
+            --version-label    "${{ steps.version.outputs.label }}" \
+            --source-bundle    S3Bucket="${{ steps.cf.outputs.s3_bucket }}",S3Key="${{ steps.version.outputs.bundle }}"
+
+      - name: Deploy version and stamp APP_VERSION env var
+        run: |
+          aws elasticbeanstalk update-environment \
+            --application-name "${{ steps.cf.outputs.eb_app }}" \
+            --environment-name "${{ steps.cf.outputs.eb_env }}" \
+            --version-label    "${{ steps.version.outputs.label }}" \
+            --option-settings  "Namespace=aws:elasticbeanstalk:application:environment,OptionName=APP_VERSION,Value=${{ steps.version.outputs.label }}"
+
+      - name: Wait for deployment to complete
+        run: |
+          aws elasticbeanstalk wait environment-updated \
+            --application-name "${{ steps.cf.outputs.eb_app }}" \
+            --environment-name "${{ steps.cf.outputs.eb_env }}"
+          echo "Deployed: ${{ steps.version.outputs.label }}"

@@ -1,0 +1,223 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >
+  Elastic Beanstalk Node.js app with DynamoDB, S3 deployment bucket,
+  and a keyless GitHub Actions OIDC role. Deploy with:
+    aws cloudformation deploy \
+      --template-file cloudformation/template.yaml \
+      --stack-name eb-node-app \
+      --capabilities CAPABILITY_NAMED_IAM \
+      --parameter-overrides GitHubOwner=<your-github-username>
+
+Parameters:
+  GitHubOwner:
+    Type: String
+    Description: GitHub username or organization that owns the repository
+
+  GitHubRepo:
+    Type: String
+    Default: eb-node-app
+    Description: GitHub repository name
+
+  SolutionStackName:
+    Type: String
+    Default: "64bit Amazon Linux 2023 v6.3.0 running Node.js 20"
+    Description: >
+      EB Node.js solution stack. Find the latest available:
+        aws elasticbeanstalk list-available-solution-stacks \
+          --query "SolutionStacks" --output text | grep "Node.js 20"
+
+Resources:
+
+  # ── S3 Deployment Bucket ──────────────────────────────────────────────────
+  DeploymentBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub "eb-node-app-deployments-${AWS::AccountId}"
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      LifecycleConfiguration:
+        Rules:
+          - Id: ExpireOldBundles
+            Status: Enabled
+            ExpirationInDays: 30
+
+  # ── DynamoDB Table ────────────────────────────────────────────────────────
+  VisitsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: eb-app-visits
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: pk
+          AttributeType: S
+      KeySchema:
+        - AttributeName: pk
+          KeyType: HASH
+
+  # ── EB Instance Role & Profile ────────────────────────────────────────────
+  EBInstanceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: eb-node-app-instance-role
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ec2.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AWSElasticBeanstalkWebTier
+      Policies:
+        - PolicyName: DynamoDBAccess
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - dynamodb:GetItem
+                  - dynamodb:PutItem
+                  - dynamodb:UpdateItem
+                  - dynamodb:DescribeTable
+                  - dynamodb:CreateTable
+                Resource: !GetAtt VisitsTable.Arn
+
+  EBInstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      InstanceProfileName: eb-node-app-instance-profile
+      Roles:
+        - !Ref EBInstanceRole
+
+  # ── GitHub Actions OIDC (keyless auth — no stored AWS credentials) ────────
+  GitHubOidcProvider:
+    Type: AWS::IAM::OIDCProvider
+    Properties:
+      Url: https://token.actions.githubusercontent.com
+      ClientIdList:
+        - sts.amazonaws.com
+      ThumbprintList:
+        - 6938fd4d98bab03faadb97b34396831e3780aea1
+
+  GitHubActionsRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: github-actions-eb-deployer
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Federated: !GetAtt GitHubOidcProvider.Arn
+            Action: sts:AssumeRoleWithWebIdentity
+            Condition:
+              StringEquals:
+                token.actions.githubusercontent.com:aud: sts.amazonaws.com
+              StringLike:
+                # Restrict to pushes on main from this specific repo
+                token.actions.githubusercontent.com:sub:
+                  !Sub "repo:${GitHubOwner}/${GitHubRepo}:ref:refs/heads/main"
+      Policies:
+        - PolicyName: EBDeployPolicy
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Sid: S3BundleUpload
+                Effect: Allow
+                Action:
+                  - s3:PutObject
+                  - s3:GetObject
+                Resource: !Sub "${DeploymentBucket.Arn}/*"
+              - Sid: EBManage
+                Effect: Allow
+                Action:
+                  - elasticbeanstalk:CreateApplicationVersion
+                  - elasticbeanstalk:UpdateEnvironment
+                  - elasticbeanstalk:DescribeEnvironments
+                  - elasticbeanstalk:DescribeEvents
+                  - elasticbeanstalk:DescribeApplicationVersions
+                  - elasticbeanstalk:DescribeEnvironmentResources
+                Resource: "*"
+              - Sid: CloudFormationReadOutputs
+                Effect: Allow
+                Action:
+                  - cloudformation:DescribeStacks
+                Resource: !Sub "arn:aws:cloudformation:${AWS::Region}:${AWS::AccountId}:stack/${AWS::StackName}*"
+
+  # ── Elastic Beanstalk ─────────────────────────────────────────────────────
+  EBApplication:
+    Type: AWS::ElasticBeanstalk::Application
+    Properties:
+      ApplicationName: eb-node-app
+      Description: Node.js web application managed by Elastic Beanstalk
+
+  EBEnvironment:
+    Type: AWS::ElasticBeanstalk::Environment
+    DependsOn: EBInstanceProfile
+    Properties:
+      ApplicationName: !Ref EBApplication
+      EnvironmentName: eb-node-app-env
+      SolutionStackName: !Ref SolutionStackName
+      Tier:
+        Name: WebServer
+        Type: Standard
+      OptionSettings:
+        # Instance profile so the EC2 instance can reach DynamoDB
+        - Namespace: aws:autoscaling:launchconfiguration
+          OptionName: IamInstanceProfile
+          Value: !Ref EBInstanceProfile
+
+        # Single instance — no ALB cost for a lab environment
+        - Namespace: aws:elasticbeanstalk:environment
+          OptionName: EnvironmentType
+          Value: SingleInstance
+
+        - Namespace: aws:autoscaling:launchconfiguration
+          OptionName: InstanceType
+          Value: t3.micro
+
+        # Enhanced health reporting
+        - Namespace: aws:elasticbeanstalk:healthreporting:system
+          OptionName: SystemType
+          Value: enhanced
+
+        # Application environment variables
+        - Namespace: aws:elasticbeanstalk:application:environment
+          OptionName: DYNAMO_TABLE
+          Value: !Ref VisitsTable
+
+        - Namespace: aws:elasticbeanstalk:application:environment
+          OptionName: AWS_REGION
+          Value: !Sub "${AWS::Region}"
+
+        - Namespace: aws:elasticbeanstalk:application:environment
+          OptionName: APP_VERSION
+          Value: "1.0.0"
+
+        - Namespace: aws:elasticbeanstalk:application:environment
+          OptionName: ENVIRONMENT_NAME
+          Value: production
+
+Outputs:
+  GitHubActionsRoleArn:
+    Description: "Add this to GitHub secret: AWS_ROLE_ARN"
+    Value: !GetAtt GitHubActionsRole.Arn
+
+  S3BucketName:
+    Description: S3 bucket for deployment bundles
+    Value: !Ref DeploymentBucket
+
+  EBApplicationName:
+    Description: Elastic Beanstalk application name
+    Value: !Ref EBApplication
+
+  EBEnvironmentName:
+    Description: Elastic Beanstalk environment name
+    Value: !Ref EBEnvironment
+
+  ApplicationURL:
+    Description: Public URL of the deployed application
+    Value: !Sub "http://${EBEnvironment.EndpointURL}"
