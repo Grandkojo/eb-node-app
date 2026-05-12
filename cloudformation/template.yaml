@@ -6,7 +6,7 @@ Description: >
       --template-file cloudformation/template.yaml \
       --stack-name eb-node-app \
       --capabilities CAPABILITY_NAMED_IAM \
-      --parameter-overrides GitHubOwner=<your-github-username>
+      --parameter-overrides GitHubOwner=<your-github-username> --region eu-north-1
 
 Parameters:
   GitHubOwner:

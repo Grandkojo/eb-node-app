@@ -11,7 +11,7 @@ permissions:
   id-token: write # Required for OIDC — no stored AWS credentials needed
 
 env:
-  AWS_REGION: us-east-1
+  AWS_REGION: eu-north-1
   S3_BUCKET: eb-node-app-deployments-${{ secrets.AWS_ACCOUNT_ID }}
   EB_APP_NAME: eb-node-app
   EB_ENV_NAME: eb-node-app-env
