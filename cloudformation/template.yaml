@@ -128,8 +128,12 @@ Resources:
                 # Restrict to pushes on main from this specific repo
                 token.actions.githubusercontent.com:sub:
                   !Sub "repo:${GitHubOwner}/${GitHubRepo}:ref:refs/heads/main"
+      # AdministratorAccess-AWSElasticBeanstalk covers all EB internal operations
+      # including the CloudFormation, S3, and EC2 calls EB makes on behalf of the caller
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AdministratorAccess-AWSElasticBeanstalk
       Policies:
-        - PolicyName: EBDeployPolicy
+        - PolicyName: DeploymentBucketAccess
           PolicyDocument:
             Version: "2012-10-17"
             Statement:
@@ -139,28 +143,6 @@ Resources:
                   - s3:PutObject
                   - s3:GetObject
                 Resource: !Sub "${DeploymentBucket.Arn}/*"
-              - Sid: EBManage
-                Effect: Allow
-                Action:
-                  - elasticbeanstalk:CreateApplicationVersion
-                  - elasticbeanstalk:UpdateEnvironment
-                  - elasticbeanstalk:DescribeEnvironments
-                  - elasticbeanstalk:DescribeEvents
-                  - elasticbeanstalk:DescribeApplicationVersions
-                  - elasticbeanstalk:DescribeEnvironmentResources
-                Resource: "*"
-              - Sid: EBInternalBucket
-                Effect: Allow
-                Action:
-                  - s3:*
-                Resource:
-                  - !Sub "arn:${AWS::Partition}:s3:::elasticbeanstalk-${AWS::Region}-${AWS::AccountId}"
-                  - !Sub "arn:${AWS::Partition}:s3:::elasticbeanstalk-${AWS::Region}-${AWS::AccountId}/*"
-              - Sid: CloudFormationReadOutputs
-                Effect: Allow
-                Action:
-                  - cloudformation:DescribeStacks
-                Resource: !Sub "arn:${AWS::Partition}:cloudformation:${AWS::Region}:${AWS::AccountId}:stack/${AWS::StackName}*"
 
   # ── Elastic Beanstalk ─────────────────────────────────────────────────────
   EBApplication:
