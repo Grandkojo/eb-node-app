@@ -20,7 +20,7 @@ Parameters:
 
   SolutionStackName:
     Type: String
-    Default: "64bit Amazon Linux 2023 v6.3.0 running Node.js 20"
+    Default: "64bit Amazon Linux 2023 v6.10.3 running Node.js 20"
     Description: >
       EB Node.js solution stack. Find the latest available:
         aws elasticbeanstalk list-available-solution-stacks \
@@ -38,6 +38,10 @@ Resources:
         BlockPublicPolicy: true
         IgnorePublicAcls: true
         RestrictPublicBuckets: true
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
       LifecycleConfiguration:
         Rules:
           - Id: ExpireOldBundles
@@ -47,6 +51,8 @@ Resources:
   # ── DynamoDB Table ────────────────────────────────────────────────────────
   VisitsTable:
     Type: AWS::DynamoDB::Table
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
     Properties:
       TableName: eb-app-visits
       BillingMode: PAY_PER_REQUEST
@@ -56,6 +62,8 @@ Resources:
       KeySchema:
         - AttributeName: pk
           KeyType: HASH
+      SSESpecification:
+        SSEEnabled: true
 
   # ── EB Instance Role & Profile ────────────────────────────────────────────
   EBInstanceRole:
@@ -145,7 +153,7 @@ Resources:
                 Effect: Allow
                 Action:
                   - cloudformation:DescribeStacks
-                Resource: !Sub "arn:aws:cloudformation:${AWS::Region}:${AWS::AccountId}:stack/${AWS::StackName}*"
+                Resource: !Sub "arn:${AWS::Partition}:cloudformation:${AWS::Region}:${AWS::AccountId}:stack/${AWS::StackName}*"
 
   # ── Elastic Beanstalk ─────────────────────────────────────────────────────
   EBApplication:
@@ -156,7 +164,6 @@ Resources:
 
   EBEnvironment:
     Type: AWS::ElasticBeanstalk::Environment
-    DependsOn: EBInstanceProfile
     Properties:
       ApplicationName: !Ref EBApplication
       EnvironmentName: eb-node-app-env
@@ -221,3 +228,5 @@ Outputs:
   ApplicationURL:
     Description: Public URL of the deployed application
     Value: !Sub "http://${EBEnvironment.EndpointURL}"
+
+
