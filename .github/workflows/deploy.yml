@@ -12,7 +12,9 @@ permissions:
 
 env:
   AWS_REGION: us-east-1
-  CF_STACK_NAME: eb-node-app
+  S3_BUCKET: eb-node-app-deployments-${{ secrets.AWS_ACCOUNT_ID }}
+  EB_APP_NAME: eb-node-app
+  EB_ENV_NAME: eb-node-app-env
 
 jobs:
   deploy:
@@ -38,18 +40,6 @@ jobs:
           role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
           aws-region: ${{ env.AWS_REGION }}
 
-      - name: Fetch deployment config from CloudFormation outputs
-        id: cf
-        run: |
-          OUTPUTS=$(aws cloudformation describe-stacks \
-            --stack-name "${{ env.CF_STACK_NAME }}" \
-            --query "Stacks[0].Outputs" \
-            --output json)
-
-          echo "s3_bucket=$(echo "$OUTPUTS" | jq -r '.[] | select(.OutputKey=="S3BucketName") | .OutputValue')" >> "$GITHUB_OUTPUT"
-          echo "eb_app=$(echo "$OUTPUTS" | jq -r '.[] | select(.OutputKey=="EBApplicationName") | .OutputValue')"   >> "$GITHUB_OUTPUT"
-          echo "eb_env=$(echo "$OUTPUTS" | jq -r '.[] | select(.OutputKey=="EBEnvironmentName") | .OutputValue')"   >> "$GITHUB_OUTPUT"
-
       - name: Generate version label
         id: version
         run: |
@@ -60,35 +50,35 @@ jobs:
       - name: Package source bundle
         run: |
           zip -r "${{ steps.version.outputs.bundle }}" . \
-            --exclude "*.git*"          \
-            --exclude "*.github*"       \
-            --exclude "node_modules/*"  \
-            --exclude "cloudformation/*"\
+            --exclude "*.git*"           \
+            --exclude "*.github*"        \
+            --exclude "node_modules/*"   \
+            --exclude "cloudformation/*" \
             --exclude "*.zip"
 
       - name: Upload bundle to S3
         run: |
           aws s3 cp "${{ steps.version.outputs.bundle }}" \
-            "s3://${{ steps.cf.outputs.s3_bucket }}/${{ steps.version.outputs.bundle }}"
+            "s3://${{ env.S3_BUCKET }}/${{ steps.version.outputs.bundle }}"
 
       - name: Create Elastic Beanstalk application version
         run: |
           aws elasticbeanstalk create-application-version \
-            --application-name "${{ steps.cf.outputs.eb_app }}" \
+            --application-name "${{ env.EB_APP_NAME }}" \
             --version-label    "${{ steps.version.outputs.label }}" \
-            --source-bundle    S3Bucket="${{ steps.cf.outputs.s3_bucket }}",S3Key="${{ steps.version.outputs.bundle }}"
+            --source-bundle    S3Bucket="${{ env.S3_BUCKET }}",S3Key="${{ steps.version.outputs.bundle }}"
 
       - name: Deploy version and stamp APP_VERSION env var
         run: |
           aws elasticbeanstalk update-environment \
-            --application-name "${{ steps.cf.outputs.eb_app }}" \
-            --environment-name "${{ steps.cf.outputs.eb_env }}" \
+            --application-name "${{ env.EB_APP_NAME }}" \
+            --environment-name "${{ env.EB_ENV_NAME }}" \
             --version-label    "${{ steps.version.outputs.label }}" \
             --option-settings  "Namespace=aws:elasticbeanstalk:application:environment,OptionName=APP_VERSION,Value=${{ steps.version.outputs.label }}"
 
       - name: Wait for deployment to complete
         run: |
           aws elasticbeanstalk wait environment-updated \
-            --application-name "${{ steps.cf.outputs.eb_app }}" \
-            --environment-name "${{ steps.cf.outputs.eb_env }}"
+            --application-name "${{ env.EB_APP_NAME }}" \
+            --environment-name "${{ env.EB_ENV_NAME }}"
           echo "Deployed: ${{ steps.version.outputs.label }}"
